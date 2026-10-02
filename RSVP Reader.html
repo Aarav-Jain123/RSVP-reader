@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>RSVP Reader</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);
+--bg:#f6f4ef;--card:#fff;--ink:#1d1d1b;--mute:#76736b;--line:#e2ded3;--accent:#d8402b}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#141413;--card:#1e1e1c;--ink:#efece4;--mute:#97938a;--line:#33322e;--accent:#ff6b4f}}
+:root[data-theme="dark"]{--bg:#141413;--card:#1e1e1c;--ink:#efece4;--mute:#97938a;--line:#33322e;--accent:#ff6b4f}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*,*:before,*:after{box-sizing:inherit}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:720px;margin:0 auto;padding:20px 16px 48px}
+h1{font:600 22px/1.2 Georgia,serif;margin:8px 0 2px}
+.sub{color:var(--mute);margin:0 0 18px;font-size:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:16px}
+.drop{border:2px dashed var(--line);border-radius:14px;padding:28px 16px;text-align:center;cursor:pointer;color:var(--mute)}
+.drop.over,.drop:hover{border-color:var(--accent);color:var(--ink)}
+.drop b{display:block;color:var(--ink);font-size:17px;margin-bottom:4px}
+button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:10px;padding:8px 14px;cursor:pointer}
+button.p{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+button:disabled{opacity:.45;cursor:default}
+#status{font-size:14px;color:var(--mute);margin-top:10px;min-height:20px}
+textarea{width:100%;min-height:130px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);padding:10px;font:14px/1.5 system-ui,sans-serif;resize:vertical}
+.stage{position:relative;height:150px;display:flex;align-items:center;justify-content:center;background:var(--bg);border-radius:12px;border:1px solid var(--line);overflow:hidden}
+.stage:before,.stage:after{content:"";position:absolute;left:50%;width:2px;height:16px;background:var(--line);transform:translateX(-1px)}
+.stage:before{top:0}.stage:after{bottom:0}
+.word{position:absolute;left:50%;top:50%;transform:translateY(-50%);font:500 clamp(28px,8vw,52px)/1 Georgia,serif;white-space:pre;display:flex}
+.word .l{display:inline-block;text-align:right;width:0;overflow:visible}
+.word .l span{position:absolute;right:0;white-space:pre}
+.word .o{color:var(--accent)}
+.word .r{position:absolute;left:0;white-space:pre}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px}
+.row .grow{flex:1;min-width:140px}
+input[type=range]{width:100%;accent-color:var(--accent)}
+.meta{display:flex;justify-content:space-between;font-size:13px;color:var(--mute);margin-top:6px}
+.hide{display:none}
+</style>
+</head>
+<body>
+<main>
+  <h1>RSVP Reader</h1>
+  <p class="sub">Upload a PDF or a photo of text. It extracts the words and flashes them one at a time.</p>
+
+  <div class="card">
+    <div class="drop" id="drop">
+      <b>Drop a PDF or photo here, or tap to choose</b>
+      PDF text is read directly; photos and scanned pages are read by Claude
+    </div>
+    <input type="file" id="file" accept="application/pdf,image/*" class="hide">
+    <div id="status"></div>
+  </div>
+
+  <div class="card" id="reader">
+    <div class="stage"><div class="word" id="word"><span class="l"><span id="wl"></span></span><span class="o" id="wo"></span><span class="r" id="wr"></span></div></div>
+    <input type="range" id="seek" min="0" max="0" value="0" style="margin-top:14px">
+    <div class="meta"><span id="pos">0 / 0</span><span id="eta"></span></div>
+    <div class="row">
+      <button id="back" title="Back 10 words">⏪ 10</button>
+      <button class="p" id="play">Play</button>
+      <button id="fwd" title="Forward 10 words">10 ⏩</button>
+      <div class="grow"><label style="font-size:13px;color:var(--mute)">Speed: <b id="wpmv" style="color:var(--ink)">350</b> wpm</label>
+        <input type="range" id="wpm" min="100" max="900" step="25" value="350"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <b>Extracted text</b><span style="font-size:13px;color:var(--mute)">Edit it, then press Load</span>
+    </div>
+    <textarea id="text" placeholder="Extracted text appears here. You can also paste your own."></textarea>
+    <div class="row"><button id="load">Load into reader</button></div>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let words = [], idx = 0, timer = null, sample = null;
+
+// ---------- RSVP engine ----------
+function orp(w){ const n = w.length; return n<=1?0 : n<=5?1 : n<=9?2 : n<=13?3 : 4; }
+function show(){
+  const w = words[idx] || "";
+  const i = orp(w);
+  $("wl").textContent = w.slice(0,i);
+  $("wo").textContent = w.charAt(i);
+  $("wr").textContent = w.slice(i+1);
+  // keep the pivot letter centered: place the right part after the pivot's width
+  const o = $("wo"); o.style.position="absolute"; o.style.left="0"; o.style.transform="translateX(-50%)";
+  $("wr").style.left = (o.offsetWidth/2)+"px";
+  $("pos").textContent = words.length ? (idx+1)+" / "+words.length : "0 / 0";
+  $("seek").value = idx;
+  const left = Math.max(0, words.length-idx) / +$("wpm").value;
+  $("eta").textContent = words.length ? (left<1 ? "<1 min left" : Math.round(left)+" min left") : "";
+}
+function delay(w){
+  let d = 60000 / +$("wpm").value;
+  if (/[.!?]["')\]]?$/.test(w)) d *= 2.2;
+  else if (/[,;:]["')\]]?$/.test(w)) d *= 1.6;
+  else if (w.length > 9) d *= 1.3;
+  return d;
+}
+function tick(){
+  if (idx >= words.length-1){ stop(); return; }
+  idx++; show();
+  timer = setTimeout(tick, delay(words[idx]));
+}
+function start(){ if(!words.length) return; if(idx>=words.length-1) idx=0; show(); $("play").textContent="Pause"; timer=setTimeout(tick, delay(words[idx])); }
+function stop(){ clearTimeout(timer); timer=null; $("play").textContent="Play"; }
+function toggle(){ timer ? stop() : start(); }
+function jump(n){ idx = Math.max(0, Math.min(words.length-1, idx+n)); show(); }
+function loadText(t){
+  stop();
+  words = t.replace(/\s+/g," ").trim().split(" ").filter(Boolean);
+  idx = 0; $("seek").max = Math.max(0, words.length-1); show();
+  setStatus(words.length ? words.length.toLocaleString()+" words ready." : "No text to load.");
+}
+$("play").onclick = toggle;
+$("back").onclick = () => jump(-10);
+$("fwd").onclick = () => jump(10);
+$("seek").oninput = e => { idx = +e.target.value; show(); };
+$("wpm").oninput = e => { $("wpmv").textContent = e.target.value; show(); };
+$("load").onclick = () => loadText($("text").value);
+document.addEventListener("keydown", e => {
+  if (/TEXTAREA|INPUT/.test(e.target.tagName) && e.target.type!=="range") return;
+  if (e.code==="Space"){ e.preventDefault(); toggle(); }
+  if (e.code==="ArrowLeft") jump(-10);
+  if (e.code==="ArrowRight") jump(10);
+});
+function setStatus(s){ $("status").textContent = s; }
+
+// ---------- Extraction ----------
+async function ocr(blob){
+  if(!sample) throw new Error("Photo and scanned-page reading needs Claude, which isn't available in this view.");
+  const r = await sample(
+    "Transcribe all the readable text in this image exactly as written, in natural reading order. " +
+    "Join hyphenated line breaks and merge lines into paragraphs. Output only the transcribed text, with no commentary.",
+    { images: blob, modelTier: "quick", cache: true });
+  return r.text.trim();
+}
+async function fromPdf(file){
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  const pdf = await pdfjsLib.getDocument({data: await file.arrayBuffer()}).promise;
+  let out = [];
+  for (let p=1; p<=pdf.numPages; p++){
+    setStatus("Reading page "+p+" of "+pdf.numPages+"…");
+    const page = await pdf.getPage(p);
+    const tc = await page.getTextContent();
+    let t = tc.items.map(i => i.str + (i.hasEOL ? "\n" : " ")).join("").replace(/[ \t]+/g," ").trim();
+    if (t.length < 20 && sample){            // looks scanned: OCR the rendered page
+      setStatus("Page "+p+" has no text layer, reading it as an image…");
+      const vp = page.getViewport({scale:1.6});
+      const c = document.createElement("canvas"); c.width=vp.width; c.height=vp.height;
+      await page.render({canvasContext:c.getContext("2d"), viewport:vp}).promise;
+      const blob = await new Promise(r => c.toBlob(r,"image/jpeg",.85));
+      try { t = await ocr(blob); } catch(e){ t = ""; }
+    }
+    if (t) out.push(t);
+  }
+  return out.join("\n\n");
+}
+async function handle(file){
+  if(!file) return;
+  stop(); $("text").value="";
+  try {
+    setStatus("Reading "+file.name+"…");
+    let text = "";
+    if (file.type==="application/pdf" || /\.pdf$/i.test(file.name)) text = await fromPdf(file);
+    else if (file.type.startsWith("image/")){ setStatus("Reading the photo… this can take a few seconds."); text = await ocr(file); }
+    else throw new Error("Please choose a PDF or an image.");
+    if(!text.trim()) throw new Error("I couldn't find any text in that file.");
+    $("text").value = text; loadText(text);
+  } catch(e){
+    setStatus("Couldn't extract text: " + (e.message || e.code || "unknown error"));
+  }
+}
+const drop = $("drop"), fi = $("file");
+drop.onclick = () => fi.click();
+fi.onchange = () => handle(fi.files[0]);
+["dragover","dragenter"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave","drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("over"); }));
+drop.addEventListener("drop", e => handle(e.dataTransfer.files[0]));
+
+// Light up Claude-powered OCR when available
+(async () => {
+  try {
+    if (window.claude) {
+      sample = await claude.use("sample");
+      if (sample) { const c = await sample.limits().catch(()=>null); if (!c || !c.images) sample = null; }
+    }
+  } catch(e){ sample = null; }
+})();
+show();
+</script>
+</body>
+</html>
